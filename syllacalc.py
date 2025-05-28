@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import datetime
 import logging
 from pathlib import Path
@@ -5,6 +6,7 @@ import argparse
 from typing import Iterable, TypedDict
 import requests
 import bs4
+import tqdm
 
 PROGRAM_NAME = "syllacalc"
 LOGGING_LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}
@@ -25,10 +27,14 @@ SWE_MON_TO_NUM = {
 }
 
 
-class CourseInfo(TypedDict):
-    title: str
-    code: str
+@dataclass(frozen=True, eq=True, order=True, slots=True)
+class CourseInfo:
     datetime: datetime.datetime
+    code: str
+    title: str
+
+    def __str__(self):
+        return f"{self.datetime.strftime('%Y-%m-%d %H:%M')} - {self.code} - {self.title}"
 
 
 def parse_date(date_str: str) -> datetime.datetime:
@@ -123,7 +129,7 @@ def main():
         "-l",
         "--logging",
         choices=["info", "debug", "warning", "error"],
-        default="info",
+        default="warning",
     )
     args = parser.parse_args()
 
@@ -133,41 +139,47 @@ def main():
     logging.info(f"Running {PROGRAM_NAME} with args: {args}")
     course_codes = validate_course_codes(args.course_code)
 
-    output(f"Looking up exam dates for year {args.year} for courses: {course_codes}")
+    output(f"Course codes: ({', '.join(course_codes)})")
     course_infos: list[CourseInfo] = []
+    pbar = tqdm.tqdm(total=len(course_codes), desc="Looking up courses: ")
     for course_code in course_codes:
-        output("Looking up course:", course_code)
+        pbar.set_description(f"Looking up course {course_code}")
         url = get_url_course(course_code, args.year)
-        output(f"Fetching {url}")
+        logging.info(f"Looking up course {course_code} with url {url}")
         soup = get_soup(url)
         main = get_main(soup)
         if not main:
-            output(f"Course code {course_code} not found")
+            logging.warning(f"Course code {course_code} not found")
             output("")
+            pbar.update(1)
             continue
 
         title = get_course_title(soup)
         exam_datetimes = get_course_exam_datetimes(soup)
 
-        output(f"Title: {title}")
-        output(f"Course code: {course_code}")
-        output(f"Exam dates: {'\n\t' + '\n\t'.join(map(lambda x: x.strftime('%Y %m %d %H:%M'), exam_datetimes))}")
-        output("")
-
         for exam_datetime in exam_datetimes:
-            course_infos.append({"title": title, "code": course_code, "datetime": exam_datetime})
+            course_infos.append(
+                CourseInfo(
+                    datetime=exam_datetime,
+                    code=course_code,
+                    title=title,
+                )
+            )
+
+        pbar.update(1)
+    pbar.close()
 
     if not course_infos:
         output("No courses found")
         return
 
-    course_infos.sort(key=lambda x: (x["datetime"], x["title"]))
+    course_infos = [course_info for course_info in course_infos if course_info.datetime >= datetime.datetime.now()]
+    course_infos = list(set(course_infos))
+    course_infos = sorted(course_infos)
 
     output("Exams:")
     for course_info in course_infos:
-        output(
-            f"\t{course_info['datetime'].strftime('%Y-%m-%d %H:%M')} - {course_info['code']} - {course_info['title']}"
-        )
+        output(f"\t{str(course_info)}")
 
 
 if __name__ == "__main__":
