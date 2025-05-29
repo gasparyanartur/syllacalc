@@ -7,9 +7,16 @@ from typing import Iterable, TypedDict
 import requests
 import bs4
 import tqdm
+import socket
+
 
 PROGRAM_NAME = "syllacalc"
-LOGGING_LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}
+LOGGING_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
 URL_PATTERN = "https://www.chalmers.se/en/education/your-studies/find-course-and-programme-syllabi/course-syllabus/{coursecode}/?acYear={year}%2F{next_year}"
 SWE_MON_TO_NUM = {
     "jan": 1,
@@ -27,6 +34,22 @@ SWE_MON_TO_NUM = {
 }
 
 
+def force_ipv4():
+    original_getaddrinfo = socket.getaddrinfo
+
+    def getaddrinfo_ipv4_only(*args, **kwargs):
+        return [
+            ai
+            for ai in original_getaddrinfo(*args, **kwargs)
+            if ai[0] == socket.AF_INET
+        ]
+
+    socket.getaddrinfo = getaddrinfo_ipv4_only
+
+
+force_ipv4()  # Force IPv4 to avoid issues with IPv6 DNS resolution on some systems
+
+
 @dataclass(frozen=True, eq=True, order=True, slots=True)
 class CourseInfo:
     datetime: datetime.datetime
@@ -34,7 +57,9 @@ class CourseInfo:
     title: str
 
     def __str__(self):
-        return f"{self.datetime.strftime('%Y-%m-%d %H:%M')} - {self.code} - {self.title}"
+        return (
+            f"{self.datetime.strftime('%Y-%m-%d %H:%M')} - {self.code} - {self.title}"
+        )
 
 
 def parse_date(date_str: str) -> datetime.datetime:
@@ -58,9 +83,32 @@ def get_url_course(coursecode: str, year: int):
 
 
 def get_soup(url: str) -> bs4.BeautifulSoup:
-    with requests.get(url) as response:
-        raw_page = response.text
-    return bs4.BeautifulSoup(raw_page, "html.parser")
+    logging.debug(f"Fetching URL: {url}")
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/113.0.0.0 Safari/537.36"
+        )
+    }
+
+    response = requests.get(
+        url, headers=headers, allow_redirects=True, timeout=(5, 10), stream=True
+    )
+    logging.debug(f"Received response with status code: {response.status_code}")
+
+    # Handle redirects
+    if response.history:
+        logging.debug(f"Redirected to {response.url} from {url}")
+
+    if response.status_code != 200:
+        logging.error(
+            f"Failed to fetch URL: {url} with status code {response.status_code}"
+        )
+        raise ValueError(f"Failed to fetch URL: {url}")
+    logging.debug("Successfully fetched the page")
+
+    return bs4.BeautifulSoup(response.text, "html.parser")
 
 
 def get_main(soup: bs4.BeautifulSoup) -> bs4.BeautifulSoup:
@@ -123,7 +171,9 @@ def output(*args, **kwargs):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-c", "--course_code", type=str, nargs="+", default=["courses.txt"])
+    parser.add_argument(
+        "-c", "--course_code", type=str, nargs="+", default=["courses.txt"]
+    )
     parser.add_argument("-y", "--year", type=int, default=2024)
     parser.add_argument(
         "-l",
@@ -147,6 +197,7 @@ def main():
         url = get_url_course(course_code, args.year)
         logging.info(f"Looking up course {course_code} with url {url}")
         soup = get_soup(url)
+        logging.debug(f"Got soup for course {course_code}")
         main = get_main(soup)
         if not main:
             logging.warning(f"Course code {course_code} not found")
@@ -173,7 +224,11 @@ def main():
         output("No courses found")
         return
 
-    course_infos = [course_info for course_info in course_infos if course_info.datetime >= datetime.datetime.now()]
+    course_infos = [
+        course_info
+        for course_info in course_infos
+        if course_info.datetime >= datetime.datetime.now()
+    ]
     course_infos = list(set(course_infos))
     course_infos = sorted(course_infos)
 
